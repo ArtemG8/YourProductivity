@@ -1,14 +1,21 @@
 import random
 from aiogram import Router, F
 from aiogram.filters import Command, CommandStart, StateFilter
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardRemove, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from lexicon import LEXICON_RU, MOTIVATIONAL_MESSAGES
-from database import get_or_create_user, add_flow_record, add_sprint_record, get_user_productivity_history
-from keyboards import create_cancel_keyboard
+from database import (
+    get_or_create_user,
+    add_flow_record,
+    add_sprint_record,
+    get_user_productivity_history,
+    get_productivity_sum_by_day,
+    get_productivity_sum_for_month,
+)
+from keyboards import create_cancel_keyboard, create_flow_active_kb, create_flow_paused_kb
 from states import RecordStates
 
 router = Router()
@@ -35,30 +42,85 @@ async def process_start_command(message: Message, session: AsyncSession, state: 
 async def process_help_command(message: Message):
     await message.answer(LEXICON_RU['/help'])
 
-# Обработчик команды /record_flow
+# Обработчик команды /record_flow — запускает таймер потока
 @router.message(Command(commands='record_flow'), StateFilter(None))
 async def process_record_flow_command(message: Message, state: FSMContext):
-    await message.answer(LEXICON_RU['/record_flow'], reply_markup=create_cancel_keyboard())
-    await state.set_state(RecordStates.waiting_for_flow_duration)
+    now_ts = int(datetime.utcnow().timestamp())
+    sent = await message.answer(LEXICON_RU['/record_flow'], reply_markup=create_flow_active_kb())
+    await state.update_data(
+        flow_start_ts=now_ts,
+        flow_accumulated_sec=0,
+        flow_is_paused=False,
+        flow_message_id=sent.message_id,
+        flow_chat_id=sent.chat.id,
+    )
+    await state.set_state(RecordStates.flow_active)
 
-# Обработчик длительности потока
-@router.message(StateFilter(RecordStates.waiting_for_flow_duration))
-async def process_flow_duration(message: Message, state: FSMContext, session: AsyncSession):
-    if message.text == LEXICON_RU['cancel_button']:
-        await state.clear()
-        await message.answer(LEXICON_RU['cancel_action'], reply_markup=ReplyKeyboardRemove())
-        return
+def _format_hh_mm(total_seconds: int) -> tuple[int, int]:
+    minutes = total_seconds // 60
+    hours = minutes // 60
+    minutes = minutes % 60
+    return hours, minutes
 
+# Пауза таймера
+@router.callback_query(StateFilter(RecordStates.flow_active), F.data == 'flow_pause')
+async def on_flow_pause(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    start_ts = data.get('flow_start_ts')
+    accumulated = data.get('flow_accumulated_sec', 0)
+    now_ts = int(datetime.utcnow().timestamp())
+    if start_ts is not None:
+        accumulated += max(0, now_ts - int(start_ts))
+    await state.update_data(flow_accumulated_sec=accumulated, flow_is_paused=True, flow_start_ts=None)
+    await callback.message.edit_reply_markup(reply_markup=create_flow_paused_kb())
+    await callback.answer(LEXICON_RU['flow_paused'], show_alert=False)
+    await state.set_state(RecordStates.flow_paused)
+
+# Возобновление таймера
+@router.callback_query(StateFilter(RecordStates.flow_paused), F.data == 'flow_resume')
+async def on_flow_resume(callback: CallbackQuery, state: FSMContext):
+    now_ts = int(datetime.utcnow().timestamp())
+    await state.update_data(flow_start_ts=now_ts, flow_is_paused=False)
+    await callback.message.edit_reply_markup(reply_markup=create_flow_active_kb())
+    await callback.answer(LEXICON_RU['flow_resumed'], show_alert=False)
+    await state.set_state(RecordStates.flow_active)
+
+# Завершение таймера
+@router.callback_query(StateFilter('*'), F.data == 'flow_finish')
+async def on_flow_finish(callback: CallbackQuery, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    accumulated = int(data.get('flow_accumulated_sec', 0))
+    start_ts = data.get('flow_start_ts')
+    if start_ts is not None and not data.get('flow_is_paused', False):
+        now_ts = int(datetime.utcnow().timestamp())
+        accumulated += max(0, now_ts - int(start_ts))
+
+    total_seconds = max(0, accumulated)
+    hours, minutes = _format_hh_mm(total_seconds)
+
+    # Запись в БД в минутах (округление вниз)
+    await add_flow_record(session, user_id=callback.from_user.id, duration_minutes=(total_seconds // 60))
+
+    # Скрываем клавиатуру под сообщением таймера
     try:
-        duration = int(message.text)
-        if duration <= 0:
-            await message.answer(LEXICON_RU['invalid_flow_duration'])
-            return
-        await add_flow_record(session, user_id=message.from_user.id, duration_minutes=duration)
-        await message.answer(LEXICON_RU['flow_recorded'].format(duration=duration), reply_markup=ReplyKeyboardRemove())
-        await state.clear()
-    except ValueError:
-        await message.answer(LEXICON_RU['invalid_flow_duration'])
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.message.answer(LEXICON_RU['flow_finished'].format(hours=hours, minutes=minutes))
+    await state.clear()
+    await callback.answer()
+
+# Отмена (на случай, если предусмотрим кнопку отмены в паузе)
+@router.callback_query(StateFilter('*'), F.data == 'flow_cancel')
+async def on_flow_cancel(callback: CallbackQuery, state: FSMContext):
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await state.clear()
+    await callback.message.answer(LEXICON_RU['cancel_action'])
+    await callback.answer()
 
 # Обработчик команды /record_sprint
 @router.message(Command(commands='record_sprint'), StateFilter(None))
@@ -85,30 +147,112 @@ async def process_sprint_duration(message: Message, state: FSMContext, session: 
     except ValueError:
         await message.answer(LEXICON_RU['invalid_sprint_duration'])
 
+def _format_hours_minutes(total_minutes: int) -> tuple[int, int]:
+    hours = total_minutes // 60
+    minutes = total_minutes % 60
+    return hours, minutes
+
+def _format_date_dd_mm_yyyy(dt: datetime) -> str:
+    return dt.strftime('%d %m %Y')
+
+def _history_kb(mode: str, weeks_offset: int = 0, month_offset: int = 0):
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    from aiogram.types import InlineKeyboardButton
+    kb = InlineKeyboardBuilder()
+    if mode == 'days':
+        kb.row(
+            InlineKeyboardButton(text=LEXICON_RU['btn_hist_prev_weeks'], callback_data=f'hist:days:{weeks_offset-1}:0'),
+            InlineKeyboardButton(text=LEXICON_RU['btn_hist_next_weeks'], callback_data=f'hist:days:{weeks_offset+1}:0'),
+        )
+        kb.row(InlineKeyboardButton(text=LEXICON_RU['btn_hist_months'], callback_data=f'hist:months:0:0'))
+    else:
+        # months mode; month_offset шагами по 1 месяцу
+        kb.row(
+            InlineKeyboardButton(text='◀ Месяц', callback_data=f'hist:months:0:{month_offset-1}'),
+            InlineKeyboardButton(text='Месяц ▶', callback_data=f'hist:months:0:{month_offset+1}'),
+        )
+        kb.row(InlineKeyboardButton(text=LEXICON_RU['btn_hist_days'], callback_data=f'hist:days:0:0'))
+    return kb.as_markup()
+
+async def _render_history_days(session: AsyncSession, user_id: int, weeks_offset: int = 0) -> str:
+    # Окно 14 дней: с today-13 до today с учётом смещения окна
+    today = datetime.utcnow().replace(hour=23, minute=59, second=59, microsecond=0)
+    window_start = today - timedelta(days=13)
+    # Смещение окна блоками по 14 дней
+    shift_days = weeks_offset * 14
+    start_dt = window_start - timedelta(days=shift_days)
+    end_dt = today - timedelta(days=shift_days)
+
+    by_day = await get_productivity_sum_by_day(session, user_id, start_dt, end_dt)
+
+    lines = [LEXICON_RU['history_days_header']]
+    total_minutes = 0
+    # выводим по дням от старого к новому
+    for i in range(14):
+        day_dt = (start_dt + timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
+        # ключи by_day приходят как date; приведём к той же дате
+        key_date = day_dt.date()
+        minutes = int(by_day.get(key_date, 0))
+        total_minutes += minutes
+        h, m = _format_hours_minutes(minutes)
+        lines.append(f"- {h} часов {m} минут ({_format_date_dd_mm_yyyy(day_dt)})")
+
+    h_tot, m_tot = _format_hours_minutes(total_minutes)
+    lines.append(LEXICON_RU['history_total'].format(hours=h_tot, minutes=m_tot))
+    # Если совсем нет данных в окне
+    if total_minutes == 0:
+        lines.insert(1, LEXICON_RU['history_no_data_period'])
+    return "\n".join(lines)
+
+async def _render_history_month(session: AsyncSession, user_id: int, month_offset: int = 0) -> str:
+    # month_offset 0 = текущий месяц; -1 = предыдущий; +1 = следующий и т.д.
+    base = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # вычисляем смещённый месяц
+    year = base.year
+    month = base.month + month_offset
+    while month <= 0:
+        month += 12
+        year -= 1
+    while month > 12:
+        month -= 12
+        year += 1
+    total_minutes = await get_productivity_sum_for_month(session, user_id, year, month)
+    h, m = _format_hours_minutes(total_minutes)
+    # Формат заголовка: используем 01 mm yyyy для единообразия с проектом (день мес год)
+    month_title = datetime(year=year, month=month, day=1)
+    lines = [LEXICON_RU['history_months_header']]
+    lines.append(f"- {h} часов {m} минут ({_format_date_dd_mm_yyyy(month_title)})")
+    lines.append(LEXICON_RU['history_total'].format(hours=h, minutes=m))
+    if total_minutes == 0:
+        lines.insert(1, LEXICON_RU['history_no_data_period'])
+    return "\n".join(lines)
+
 # Обработчик команды /history
 @router.message(Command(commands='history'))
 async def process_history_command(message: Message, session: AsyncSession):
-    flow_records, sprint_records = await get_user_productivity_history(session, user_id=message.from_user.id)
+    text = await _render_history_days(session, user_id=message.from_user.id, weeks_offset=0)
+    await message.answer(text, reply_markup=_history_kb('days', weeks_offset=0))
 
-    if not flow_records and not sprint_records:
-        await message.answer(LEXICON_RU['no_history'])
+@router.callback_query(F.data.startswith('hist:'))
+async def on_history_pagination(callback: CallbackQuery, session: AsyncSession):
+    # Формат колбэка: hist:{mode}:{weeks_offset}:{month_offset}
+    try:
+        _, mode, weeks_offset_str, month_offset_str = callback.data.split(':', 3)
+        weeks_offset = int(weeks_offset_str)
+        month_offset = int(month_offset_str)
+    except Exception:
+        await callback.answer()
         return
 
-    history_text = LEXICON_RU['/history']
-    all_records = sorted(
-        list(flow_records) + list(sprint_records),
-        key=lambda x: x.recorded_at,
-        reverse=True
-    )
-
-    for record in all_records:
-        date_str = record.recorded_at.strftime('%Y-%m-%d %H:%M')
-        if isinstance(record, type(flow_records[0]) if flow_records else object):
-            history_text += LEXICON_RU['flow_entry'].format(duration=record.duration_minutes, date=date_str)
-        elif isinstance(record, type(sprint_records[0]) if sprint_records else object):
-            history_text += LEXICON_RU['sprint_entry'].format(duration=record.duration_minutes, date=date_str)
-
-    await message.answer(history_text)
+    if mode == 'days':
+        text = await _render_history_days(session, user_id=callback.from_user.id, weeks_offset=weeks_offset)
+        await callback.message.edit_text(text)
+        await callback.message.edit_reply_markup(_history_kb('days', weeks_offset=weeks_offset))
+    else:
+        text = await _render_history_month(session, user_id=callback.from_user.id, month_offset=month_offset)
+        await callback.message.edit_text(text)
+        await callback.message.edit_reply_markup(_history_kb('months', month_offset=month_offset))
+    await callback.answer()
 
 # Обработчик команды /motivate
 @router.message(Command(commands='motivate'))
