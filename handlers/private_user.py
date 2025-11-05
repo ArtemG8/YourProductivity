@@ -38,9 +38,9 @@ async def process_start_command(message: Message, session: AsyncSession, state: 
         await message.answer(LEXICON_RU['welcome_back'])
 
 # Обработчик команды /help
-@router.message(Command(commands='help'))
+@router.message(Command(commands='/start'))
 async def process_help_command(message: Message):
-    await message.answer(LEXICON_RU['/help'])
+    await message.answer(LEXICON_RU['/start'])
 
 # Обработчик команды /record_flow — запускает таймер потока
 @router.message(Command(commands='record_flow'), StateFilter(None))
@@ -152,8 +152,20 @@ def _format_hours_minutes(total_minutes: int) -> tuple[int, int]:
     minutes = total_minutes % 60
     return hours, minutes
 
+
+from datetime import datetime
+
 def _format_date_dd_mm_yyyy(dt: datetime) -> str:
-    return dt.strftime('%d %m %Y')
+    month_names = {
+        1: "января", 2: "февраля", 3: "марта",
+        4: "апреля", 5: "мая", 6: "июня",
+        7: "июля", 8: "августа", 9: "сентября",
+        10: "октября", 11: "ноября", 12: "декабря"
+    }
+    day = dt.day
+    month = month_names[dt.month]
+    year = dt.year
+    return f"{day:02d} {month} {year}"
 
 def _history_kb(mode: str, weeks_offset: int = 0, month_offset: int = 0):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
