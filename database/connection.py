@@ -26,3 +26,8 @@ async def create_db_and_tables():
     from database.models import Base
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+# async def run_migrations():
+#     """Выполняет миграции базы данных"""
+#     from database.migrations import migrate_database
+#     await migrate_database(engine)

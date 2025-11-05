@@ -14,8 +14,10 @@ from database import (
     get_user_productivity_history,
     get_productivity_sum_by_day,
     get_productivity_sum_for_month,
+    get_all_months_with_data,
+    get_total_productivity,
 )
-from keyboards import create_cancel_keyboard, create_flow_active_kb, create_flow_paused_kb
+from keyboards import create_cancel_keyboard, create_flow_active_kb, create_flow_paused_kb, create_history_keyboard
 from states import RecordStates
 
 router = Router()
@@ -28,9 +30,7 @@ async def process_start_command(message: Message, session: AsyncSession, state: 
     user = await get_or_create_user(
         session,
         telegram_id=user_data.id,
-        username=user_data.username,
-        first_name=user_data.first_name,
-        last_name=user_data.last_name
+        username=user_data.username
     )
     if user.created_at == user.created_at: # Простая проверка на нового/вернувшегося пользователя
         await message.answer(LEXICON_RU['/start'])
@@ -97,9 +97,10 @@ async def on_flow_finish(callback: CallbackQuery, state: FSMContext, session: As
 
     total_seconds = max(0, accumulated)
     hours, minutes = _format_hh_mm(total_seconds)
+    total_minutes = total_seconds // 60
 
     # Запись в БД в минутах (округление вниз)
-    await add_flow_record(session, user_id=callback.from_user.id, duration_minutes=(total_seconds // 60))
+    await add_flow_record(session, user_id=callback.from_user.id, duration_minutes=total_minutes, username=callback.from_user.username)
 
     # Скрываем клавиатуру под сообщением таймера
     try:
@@ -107,7 +108,18 @@ async def on_flow_finish(callback: CallbackQuery, state: FSMContext, session: As
     except Exception:
         pass
 
-    await callback.message.answer(LEXICON_RU['flow_finished'].format(hours=hours, minutes=minutes))
+    # Выбираем сообщение в зависимости от времени концентрации
+    if total_minutes < 60:
+        # Меньше часа
+        message_text = LEXICON_RU['flow_finished_short'].format(hours=hours, minutes=minutes)
+    elif total_minutes < 90:
+        # Больше часа, но меньше 1.5 часов
+        message_text = LEXICON_RU['flow_finished_good'].format(hours=hours, minutes=minutes)
+    else:
+        # Больше 1 часа 30 минут
+        message_text = LEXICON_RU['flow_finished'].format(hours=hours, minutes=minutes)
+
+    await callback.message.answer(message_text, reply_markup=create_history_keyboard())
     await state.clear()
     await callback.answer()
 
@@ -141,7 +153,7 @@ async def process_sprint_duration(message: Message, state: FSMContext, session: 
         if duration <= 0:
             await message.answer(LEXICON_RU['invalid_sprint_duration'])
             return
-        await add_sprint_record(session, user_id=message.from_user.id, duration_minutes=duration)
+        await add_sprint_record(session, user_id=message.from_user.id, duration_minutes=duration, username=message.from_user.username)
         await message.answer(LEXICON_RU['sprint_recorded'].format(duration=duration), reply_markup=ReplyKeyboardRemove())
         await state.clear()
     except ValueError:
@@ -178,19 +190,13 @@ def _history_kb(mode: str, weeks_offset: int = 0, month_offset: int = 0):
         )
         kb.row(InlineKeyboardButton(text=LEXICON_RU['btn_hist_months'], callback_data=f'hist:months:0:0'))
     else:
-        # months mode; month_offset шагами по 1 месяцу
-        kb.row(
-            InlineKeyboardButton(text='◀ Месяц', callback_data=f'hist:months:0:{month_offset-1}'),
-            InlineKeyboardButton(text='Месяц ▶', callback_data=f'hist:months:0:{month_offset+1}'),
-        )
+        # months mode - показываем все месяцы
         kb.row(InlineKeyboardButton(text=LEXICON_RU['btn_hist_days'], callback_data=f'hist:days:0:0'))
     return kb.as_markup()
 
 async def _render_history_days(session: AsyncSession, user_id: int, weeks_offset: int = 0) -> str:
-    # Окно 14 дней: с today-13 до today с учётом смещения окна
     today = datetime.utcnow().replace(hour=23, minute=59, second=59, microsecond=0)
     window_start = today - timedelta(days=13)
-    # Смещение окна блоками по 14 дней
     shift_days = weeks_offset * 14
     start_dt = window_start - timedelta(days=shift_days)
     end_dt = today - timedelta(days=shift_days)
@@ -202,7 +208,7 @@ async def _render_history_days(session: AsyncSession, user_id: int, weeks_offset
     # выводим по дням от старого к новому
     for i in range(14):
         day_dt = (start_dt + timedelta(days=i)).replace(hour=0, minute=0, second=0, microsecond=0)
-        # ключи by_day приходят как date; приведём к той же дате
+        # ключи by_day приходят как date, приведём к той же дате
         key_date = day_dt.date()
         minutes = int(by_day.get(key_date, 0))
         total_minutes += minutes
@@ -211,37 +217,51 @@ async def _render_history_days(session: AsyncSession, user_id: int, weeks_offset
 
     h_tot, m_tot = _format_hours_minutes(total_minutes)
     lines.append(LEXICON_RU['history_total'].format(hours=h_tot, minutes=m_tot))
-    # Если совсем нет данных в окне
+    # Если нет данных в окне
     if total_minutes == 0:
         lines.insert(1, LEXICON_RU['history_no_data_period'])
     return "\n".join(lines)
 
 async def _render_history_month(session: AsyncSession, user_id: int, month_offset: int = 0) -> str:
-    # month_offset 0 = текущий месяц; -1 = предыдущий; +1 = следующий и т.д.
-    base = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    # вычисляем смещённый месяц
-    year = base.year
-    month = base.month + month_offset
-    while month <= 0:
-        month += 12
-        year -= 1
-    while month > 12:
-        month -= 12
-        year += 1
-    total_minutes = await get_productivity_sum_for_month(session, user_id, year, month)
-    h, m = _format_hours_minutes(total_minutes)
-    # Формат заголовка: используем 01 mm yyyy для единообразия с проектом (день мес год)
-    month_title = datetime(year=year, month=month, day=1)
+    # Получаем все месяцы с данными
+    months_data = await get_all_months_with_data(session, user_id)
+    
     lines = [LEXICON_RU['history_months_header']]
-    lines.append(f"- {h} часов {m} минут ({_format_date_dd_mm_yyyy(month_title)})")
-    lines.append(LEXICON_RU['history_total'].format(hours=h, minutes=m))
-    if total_minutes == 0:
-        lines.insert(1, LEXICON_RU['history_no_data_period'])
+    
+    # Если нет данных за месяцы
+    if not months_data:
+        lines.append(LEXICON_RU['history_no_data_period'])
+    else:
+        # Форматируем названия месяцев (именительный падеж)
+        month_names = {
+            1: "январь", 2: "февраль", 3: "март",
+            4: "апрель", 5: "май", 6: "июнь",
+            7: "июль", 8: "август", 9: "сентябрь",
+            10: "октябрь", 11: "ноябрь", 12: "декабрь"
+        }
+        
+        # Показываем все месяцы с данными
+        for year, month, total_minutes in months_data:
+            h, m = _format_hours_minutes(total_minutes)
+            month_name = month_names[month]
+            lines.append(f"- {h} часов {m} минут ({month_name} {year})")
+    
+    # Итоговая статистика за всю историю
+    total_all_minutes = await get_total_productivity(session, user_id)
+    h_tot, m_tot = _format_hours_minutes(total_all_minutes)
+    lines.append(f"Итого: {h_tot} часов {m_tot} минут")
+    
     return "\n".join(lines)
 
 # Обработчик команды /history
 @router.message(Command(commands='history'))
 async def process_history_command(message: Message, session: AsyncSession):
+    text = await _render_history_days(session, user_id=message.from_user.id, weeks_offset=0)
+    await message.answer(text, reply_markup=_history_kb('days', weeks_offset=0))
+
+# Обработчик кнопки "История"
+@router.message(F.text == LEXICON_RU['history_button'])
+async def process_history_button(message: Message, session: AsyncSession):
     text = await _render_history_days(session, user_id=message.from_user.id, weeks_offset=0)
     await message.answer(text, reply_markup=_history_kb('days', weeks_offset=0))
 
@@ -259,11 +279,11 @@ async def on_history_pagination(callback: CallbackQuery, session: AsyncSession):
     if mode == 'days':
         text = await _render_history_days(session, user_id=callback.from_user.id, weeks_offset=weeks_offset)
         await callback.message.edit_text(text)
-        await callback.message.edit_reply_markup(_history_kb('days', weeks_offset=weeks_offset))
+        await callback.message.edit_reply_markup(reply_markup=_history_kb('days', weeks_offset=weeks_offset))
     else:
         text = await _render_history_month(session, user_id=callback.from_user.id, month_offset=month_offset)
         await callback.message.edit_text(text)
-        await callback.message.edit_reply_markup(_history_kb('months', month_offset=month_offset))
+        await callback.message.edit_reply_markup(reply_markup=_history_kb('months', month_offset=month_offset))
     await callback.answer()
 
 # Обработчик команды /motivate
