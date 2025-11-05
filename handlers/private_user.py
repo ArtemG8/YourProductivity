@@ -17,7 +17,7 @@ from database import (
     get_all_months_with_data,
     get_total_productivity,
 )
-from keyboards import create_cancel_keyboard, create_flow_active_kb, create_flow_paused_kb, create_history_keyboard
+from keyboards import create_cancel_keyboard, create_flow_active_kb, create_flow_paused_kb, create_history_inline_kb
 from states import RecordStates
 
 router = Router()
@@ -119,7 +119,7 @@ async def on_flow_finish(callback: CallbackQuery, state: FSMContext, session: As
         # Больше 1 часа 30 минут
         message_text = LEXICON_RU['flow_finished'].format(hours=hours, minutes=minutes)
 
-    await callback.message.answer(message_text, reply_markup=create_history_keyboard())
+    await callback.message.answer(message_text, reply_markup=create_history_inline_kb())
     await state.clear()
     await callback.answer()
 
@@ -259,11 +259,12 @@ async def process_history_command(message: Message, session: AsyncSession):
     text = await _render_history_days(session, user_id=message.from_user.id, weeks_offset=0)
     await message.answer(text, reply_markup=_history_kb('days', weeks_offset=0))
 
-# Обработчик кнопки "История"
-@router.message(F.text == LEXICON_RU['history_button'])
-async def process_history_button(message: Message, session: AsyncSession):
-    text = await _render_history_days(session, user_id=message.from_user.id, weeks_offset=0)
-    await message.answer(text, reply_markup=_history_kb('days', weeks_offset=0))
+# Обработчик inline-кнопки "История"
+@router.callback_query(F.data == 'show_history')
+async def process_history_inline_button(callback: CallbackQuery, session: AsyncSession):
+    text = await _render_history_days(session, user_id=callback.from_user.id, weeks_offset=0)
+    await callback.message.answer(text, reply_markup=_history_kb('days', weeks_offset=0))
+    await callback.answer()
 
 @router.callback_query(F.data.startswith('hist:'))
 async def on_history_pagination(callback: CallbackQuery, session: AsyncSession):
