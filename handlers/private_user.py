@@ -123,7 +123,7 @@ async def on_flow_finish(callback: CallbackQuery, state: FSMContext, session: As
     await state.clear()
     await callback.answer()
 
-# Отмена (на случай, если предусмотрим кнопку отмены в паузе)
+# Отмена
 @router.callback_query(StateFilter('*'), F.data == 'flow_cancel')
 async def on_flow_cancel(callback: CallbackQuery, state: FSMContext):
     try:
@@ -159,14 +159,13 @@ async def process_sprint_duration(message: Message, state: FSMContext, session: 
     except ValueError:
         await message.answer(LEXICON_RU['invalid_sprint_duration'])
 
+#Форматирование вывода часов и минут
 def _format_hours_minutes(total_minutes: int) -> tuple[int, int]:
     hours = total_minutes // 60
     minutes = total_minutes % 60
     return hours, minutes
 
-
-from datetime import datetime
-
+# Форматирование вывода месяцев
 def _format_date_dd_mm_yyyy(dt: datetime) -> str:
     month_names = {
         1: "января", 2: "февраля", 3: "марта",
@@ -179,6 +178,7 @@ def _format_date_dd_mm_yyyy(dt: datetime) -> str:
     year = dt.year
     return f"{day:02d} {month} {year}"
 
+# Обработчик кнопок и функционала  /history
 def _history_kb(mode: str, weeks_offset: int = 0, month_offset: int = 0):
     from aiogram.utils.keyboard import InlineKeyboardBuilder
     from aiogram.types import InlineKeyboardButton

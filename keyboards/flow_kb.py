@@ -13,7 +13,7 @@ def create_flow_active_kb() -> InlineKeyboardMarkup:
     return kb_builder.as_markup()
 
 def create_flow_paused_kb() -> InlineKeyboardMarkup:
-    """Создает клавиатуру для приостановленного таймера потока (ПродолжиAть/Завершить)."""
+    """Создает клавиатуру для приостановленного таймера потока (Продолжить/Завершить)."""
     kb_builder = InlineKeyboardBuilder()
     kb_builder.row(
         InlineKeyboardButton(text=LEXICON_RU['btn_resume_flow'], callback_data='flow_resume'),

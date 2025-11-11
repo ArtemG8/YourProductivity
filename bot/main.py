@@ -35,8 +35,7 @@ async def main():
 
     # Роутеры
     dp.include_router(private_user_router)
-    # dp.include_router(admin_router) # Если появится роутер для админа
-    # dp.include_router(errors_router) # Если появится роутер для ошибок
+
 
     # Установка команд меню
     await set_main_menu(bot)
@@ -45,11 +44,7 @@ async def main():
     logger.info("Creating database tables if not exist...")
     await create_db_and_tables()
     logger.info("Database tables checked/created.")
-    
-    # # Выполняем миграции
-    # logger.info("Running database migrations...")
-    # # await run_migrations()
-    # logger.info("Database migrations completed.")
+
 
     # Пропускаем накопившиеся апдейты и запускаем polling
     await bot.delete_webhook(drop_pending_updates=True)
