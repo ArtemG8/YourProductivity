@@ -1,6 +1,6 @@
 services:
   db:
-    image: postgres:18
+    image: postgres:16
     restart: always
     environment:
       POSTGRES_DB: ${DB_NAME}
@@ -16,7 +16,7 @@ services:
     restart: always
     environment:
       BOT_TOKEN: ${BOT_TOKEN}
-      DB_HOST: yp_db
+      DB_HOST: db
       DB_PORT: ${DB_PORT}
       DB_NAME: ${DB_NAME}
       DB_USER: ${DB_USER}
