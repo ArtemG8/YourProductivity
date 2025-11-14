@@ -185,8 +185,8 @@ def _history_kb(mode: str, weeks_offset: int = 0, month_offset: int = 0):
     kb = InlineKeyboardBuilder()
     if mode == 'days':
         kb.row(
-            InlineKeyboardButton(text=LEXICON_RU['btn_hist_prev_weeks'], callback_data=f'hist:days:{weeks_offset-1}:0'),
-            InlineKeyboardButton(text=LEXICON_RU['btn_hist_next_weeks'], callback_data=f'hist:days:{weeks_offset+1}:0'),
+            InlineKeyboardButton(text=LEXICON_RU['btn_hist_prev_weeks'], callback_data=f'hist:days:{weeks_offset+1}:0'),
+            InlineKeyboardButton(text=LEXICON_RU['btn_hist_next_weeks'], callback_data=f'hist:days:{weeks_offset-1}:0'),
         )
         kb.row(InlineKeyboardButton(text=LEXICON_RU['btn_hist_months'], callback_data=f'hist:months:0:0'))
     else:
